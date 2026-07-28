@@ -5,6 +5,16 @@
 *.pem
 *.key
 
+# 토큰/시크릿을 임시로 적어두는 파일들
+# (2026-07-29: TOKEN.txt 가 커밋되어 GitHub push protection 에 차단된 적 있음)
+TOKEN.txt
+token.txt
+TOKEN
+*token*.txt
+*secret*.txt
+*credential*.txt
+secrets/
+
 # ---- 의존성 / 빌드 산출물 ----
 node_modules/
 dist/

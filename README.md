@@ -25,7 +25,7 @@
 11. [환경변수 설명](#11-환경변수-설명)
 12. [실행 및 테스트](#12-실행-및-테스트)
 13. [라즈베리파이 설치](#13-라즈베리파이-설치)
-14. [systemd 자동 실행](#14-systemd-자동-실행)
+14. [자동 실행 설정 (pm2 / systemd)](#14-자동-실행-설정)
 15. [로그 확인](#15-로그-확인)
 16. [업데이트 방법](#16-업데이트-방법)
 17. [데이터 백업](#17-데이터-백업)
@@ -83,11 +83,24 @@ Discord 채널에 **메시지 하나**를 만들어 두고, 그 메시지를 1�
 - 수집 작업 중복 실행 방지 (정기 스케줄과 `/yen-refresh`가 같은 lock 공유)
 - SIGTERM/SIGINT 정상 종료 — 재부팅·재시작 시 SQLite가 깨지지 않습니다
 - 1년보다 오래된 데이터 자동 정리
+- pm2 fork 모드 단일 인스턴스로 실행 (SQLite·Discord 메시지 충돌 방지)
 
 ### 관리 도구
 
 ```bash
 npm run cli        # 대화형 관리 도구 (.env 편집, 검증, 수집 테스트, 백업 등)
+```
+
+### 프로세스 관리
+
+pm2로 상주 실행합니다. (systemd도 지원 — [13.0](#130-프로세스-관리자-선택) 참고)
+
+```bash
+npm run pm2:start     # 시작   (= pm2 start ecosystem.config.cjs)
+npm run pm2:restart   # 재시작 (.env 변경 반영 포함)
+npm run pm2:logs      # 로그
+npm run pm2:status    # 상세 상태
+pm2 save              # 재부팅 후에도 뜨도록 목록 저장
 ```
 
 ---
@@ -152,21 +165,24 @@ yenwatch/
 │   └── types/
 ├── tests/                    180개 단위 테스트 + 통합 테스트
 ├── scripts/                  check-health, register-discord-commands, setup-notion, backup-db
-├── deploy/                   yenwatch.service, install.sh, backup.sh
-└── data/                     SQLite 파일 (git 제외)
+├── deploy/                   install-pm2.sh, install.sh, yenwatch.service, backup.sh
+├── ecosystem.config.cjs      pm2 프로세스 정의 (fork 모드, 단일 인스턴스)
+├── data/                     SQLite 파일 (git 제외)
+└── logs/                     pm2 로그 (git 제외)
 ```
 
 ---
 
 ## 4. 요구사항
 
-| 항목      | 최소                                | 권장                   |
-| --------- | ----------------------------------- | ---------------------- |
-| Node.js   | 20.11                               | 22 LTS                 |
-| OS        | Linux / macOS / Windows             | Raspberry Pi OS 64-bit |
-| 하드웨어  | 라즈베리파이 3 이상                 | 라즈베리파이 4 (2GB+)  |
-| 저장 공간 | 500 MB                              | 2 GB 이상              |
-| 계정      | Discord 계정, 관리 권한이 있는 서버 | + Notion 계정          |
+| 항목            | 최소                                | 권장                      |
+| --------------- | ----------------------------------- | ------------------------- |
+| Node.js         | 20.11                               | 22 LTS                    |
+| OS              | Linux / macOS / Windows             | Raspberry Pi OS 64-bit    |
+| 하드웨어        | 라즈베리파이 3 이상                 | 라즈베리파이 4 (2GB+)     |
+| 저장 공간       | 500 MB                              | 2 GB 이상                 |
+| 계정            | Discord 계정, 관리 권한이 있는 서버 | + Notion 계정             |
+| 프로세스 관리자 | pm2 또는 systemd                    | pm2 (`sudo npm i -g pm2`) |
 
 > **Notion은 선택 사항입니다.** `.env`에서 `NOTION_ENABLED=false`로 두면 Discord와 SQLite만 사용합니다.
 
@@ -580,9 +596,20 @@ npm run dev      # 파일 변경 시 자동 재시작, 사람이 읽기 좋은 �
 
 ### 12.4 프로덕션 실행
 
+포그라운드로 한 번 띄워 확인:
+
 ```bash
 npm run build
-npm start
+npm start                # Ctrl+C 로 종료
+```
+
+pm2로 상주 실행:
+
+```bash
+npm run build
+npm run pm2:start        # = pm2 start ecosystem.config.cjs
+pm2 save                 # 재부팅 후에도 뜨도록 목록 저장
+pm2 logs yenwatch
 ```
 
 ### 12.5 테스트
@@ -617,7 +644,23 @@ npm run format:check  # 정렬 확인만
 
 ## 13. 라즈베리파이 설치
 
-### 13.1 자동 설치 (권장)
+### 13.0 프로세스 관리자 선택
+
+두 가지 방식을 지원합니다. **하나만 고르세요.**
+
+|                | pm2                            | systemd                     |
+| -------------- | ------------------------------ | --------------------------- |
+| 설치 스크립트  | `deploy/install-pm2.sh`        | `deploy/install.sh`         |
+| 실행 권한      | 일반 사용자 (sudo 없이)        | root                        |
+| 로그 확인      | `pm2 logs yenwatch`            | `journalctl -u yenwatch -f` |
+| 부팅 자동 실행 | `pm2 startup` + **`pm2 save`** | `systemctl enable`          |
+| 추가 설치      | 필요 (`npm i -g pm2`)          | 불필요 (OS 기본)            |
+
+> ⚠️ **둘을 동시에 켜면 안 됩니다.** 프로세스가 두 개 뜨면 같은 SQLite 파일에 붙어 `database is locked`가 나고, Discord 상태 메시지를 서로 덮어씁니다. `install-pm2.sh`는 systemd 유닛이 등록돼 있으면 감지해서 비활성화할지 물어봅니다.
+
+아래 13.1은 pm2 기준입니다. systemd를 쓰시려면 [13.4](#134-systemd-로-설치하려면)를 보세요.
+
+### 13.1 자동 설치 — pm2 (권장)
 
 ```bash
 # 1. 설치 경로 준비
@@ -628,20 +671,23 @@ sudo chown -R "$USER":"$USER" /opt/yenwatch
 git clone <REPOSITORY_URL> /opt/yenwatch
 cd /opt/yenwatch
 
-# 3. 설치 스크립트 실행
+# 3. 설치 스크립트 실행 — sudo 없이 일반 사용자로!
 chmod +x deploy/*.sh          # Windows 에서 clone 했다면 실행 권한이 없을 수 있습니다
-sudo ./deploy/install.sh
+./deploy/install-pm2.sh
 ```
 
-`install.sh`가 자동으로 처리하는 것:
+> ⚠️ **`sudo ./deploy/install-pm2.sh` 로 실행하지 마세요.** pm2는 사용자 단위로 동작합니다. root로 등록하면 나중에 `pm2 status`에 아무것도 안 보여 헷갈립니다. 스크립트가 root 실행을 감지하면 거부합니다. apt 설치와 부팅 등록 때만 sudo를 요청합니다.
+
+`install-pm2.sh`가 자동으로 처리하는 것:
 
 - OS 패키지 설치 (`git curl build-essential python3 make g++ sqlite3`)
 - Node.js LTS 설치 (없거나 20 미만일 때만)
+- **pm2 + pm2-logrotate 설치** (10MB마다 분할, 14개 보관, 압축)
 - 시간대를 `Asia/Seoul`로 설정
 - `npm ci` → `npm run build`
 - `.env` 생성 및 권한 600 설정
-- systemd 유닛 생성 — **실제 로그인 사용자와 `which node` 경로를 자동 감지**해 치환
-- 부팅 자동 실행 활성화
+- **systemd 유닛 충돌 감지 및 정리**
+- `pm2 startup`으로 부팅 자동 실행 등록
 
 설치가 끝나면 다음을 진행합니다.
 
@@ -649,7 +695,10 @@ sudo ./deploy/install.sh
 npm run cli                # 설정 입력
 npm run check              # 검증
 npm run discord:register   # 슬래시 커맨드 등록
-sudo systemctl start yenwatch
+
+npm run pm2:start          # 시작
+pm2 save                   # ← 이걸 빠뜨리면 재부팅 후 안 뜹니다
+pm2 logs yenwatch          # 확인
 ```
 
 ### 13.2 수동 설치
@@ -744,11 +793,139 @@ sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=100/' /etc/dphys-swapfile
 sudo dphys-swapfile setup && sudo dphys-swapfile swapon
 ```
 
+### 13.4 systemd 로 설치하려면
+
+pm2 대신 systemd를 쓰고 싶다면 이쪽입니다. (pm2가 이미 등록돼 있다면 먼저 `pm2 delete yenwatch && pm2 save`로 정리하세요.)
+
+```bash
+cd /opt/yenwatch
+chmod +x deploy/*.sh
+sudo ./deploy/install.sh
+```
+
+`install.sh`는 실행 사용자와 `which node` 경로를 자동 감지해 서비스 파일에 치환하고, `daemon-reload` + `enable`까지 처리합니다. 자세한 운영 명령은 [14.7](#147-systemd-대안-서비스-설치)을 보세요.
+
 ---
 
-## 14. systemd 자동 실행
+## 14. 자동 실행 설정
 
-### 14.1 서비스 설치
+### 14.1 pm2 등록
+
+`install-pm2.sh`를 썼다면 이미 끝났습니다. 수동으로 하려면:
+
+```bash
+cd /opt/yenwatch
+sudo npm install -g pm2
+
+npm run build                          # dist/ 가 있어야 합니다
+npm run pm2:start                      # = pm2 start ecosystem.config.cjs
+pm2 save                               # 현재 목록 저장
+```
+
+설정은 `ecosystem.config.cjs`에 들어 있습니다. 경로·사용자를 직접 고칠 필요가 없습니다 (`cwd: __dirname`).
+
+> 🔑 **토큰은 `ecosystem.config.cjs`에 넣지 마세요.** 이 파일은 Git에 커밋됩니다. 앱이 시작할 때 `cwd`의 `.env`를 직접 읽으므로, 값은 전부 `.env`에만 두면 됩니다.
+
+### 14.2 부팅 자동 실행
+
+pm2에서 재부팅 후 봇이 안 뜨는 원인은 거의 항상 **`pm2 save`를 안 한 것**입니다. 두 단계 모두 필요합니다.
+
+```bash
+# ① pm2 데몬 자체를 부팅 시 띄우도록 등록 (한 번만)
+pm2 startup systemd
+# → 화면에 sudo 로 시작하는 명령이 출력되면 그대로 복사해서 실행하세요
+
+# ② 지금 실행 중인 프로세스 목록을 스냅샷으로 저장
+pm2 save
+```
+
+`pm2 startup`은 `pm2-<사용자>.service`라는 systemd 유닛을 만들어, 부팅 시 pm2 데몬과 **`pm2 save`로 저장된 목록**을 복원합니다. 저장을 안 하면 데몬만 뜨고 앱은 안 뜹니다.
+
+확인:
+
+```bash
+systemctl is-enabled pm2-$USER        # enabled
+cat ~/.pm2/dump.pm2 | head -5         # yenwatch 가 들어 있어야 합니다
+```
+
+> 프로세스 구성을 바꿀 때마다(`pm2 start` / `delete` / `ecosystem.config.cjs` 수정 후 재시작) **`pm2 save`를 다시 실행**하세요.
+
+### 14.3 상태 확인
+
+```bash
+pm2 status                  # 전체 목록
+pm2 describe yenwatch       # 상세 (재시작 횟수, 메모리, uptime, 로그 경로)
+pm2 monit                   # 실시간 대시보드
+```
+
+정상이면 이렇게 보입니다.
+
+```text
+┌────┬───────────┬─────────┬─────────┬─────────┬──────────┬────────┬──────┬───────────┐
+│ id │ name      │ mode    │ ↺       │ status  │ cpu      │ memory │      │           │
+├────┼───────────┼─────────┼─────────┼─────────┼──────────┼────────┼──────┼───────────┤
+│ 0  │ yenwatch  │ fork    │ 0       │ online  │ 0%       │ 78.2mb │      │           │
+└────┴───────────┴─────────┴─────────┴─────────┴──────────┴────────┴──────┴───────────┘
+```
+
+`status`가 `online`이고 `↺`(재시작 횟수)가 계속 늘지 않으면 정상입니다. 숫자가 계속 오르면 앱이 죽고 되살아나기를 반복하는 것이니 `pm2 logs yenwatch --err`를 확인하세요.
+
+### 14.4 운영 명령
+
+```bash
+npm run pm2:restart      # 재시작 (= pm2 restart yenwatch --update-env)
+npm run pm2:stop         # 중지 (목록에는 남음)
+npm run pm2:delete       # 목록에서 제거 (이후 pm2 save 필요)
+npm run pm2:logs         # 로그
+npm run pm2:status       # 상세 상태
+
+pm2 restart yenwatch     # npm 없이 직접
+pm2 flush yenwatch       # 로그 파일 비우기
+```
+
+> `.env`를 고친 뒤에는 **`--update-env`가 붙은 재시작**을 쓰세요. `npm run pm2:restart`에 이미 포함돼 있습니다. 그냥 `pm2 restart`만 하면 pm2가 이전 환경변수를 그대로 물려줍니다.
+
+### 14.5 재부팅 후 확인
+
+```bash
+sudo reboot
+
+# 재부팅 후 약 1분 뒤 접속
+pm2 status                     # yenwatch 가 online
+pm2 logs yenwatch --lines 30
+```
+
+Discord 채널의 상태 메시지가 계속 갱신되면 정상입니다.
+
+만약 목록이 비어 있다면:
+
+```bash
+pm2 resurrect                  # 저장된 목록 즉시 복원
+pm2 save                       # 다시 저장
+systemctl status pm2-$USER     # 데몬 유닛이 활성인지 확인
+```
+
+### 14.6 ecosystem.config.cjs 에서 하는 일
+
+| 설정                                    | 이유                                                                                      |
+| --------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `exec_mode: 'fork'`, `instances: 1`     | **필수.** cluster 모드로 여러 개 띄우면 SQLite가 잠기고 Discord 메시지가 충돌합니다       |
+| `kill_timeout: 30000`                   | 앱이 진행 중인 수집을 끝내고 SQLite를 안전하게 닫을 시간 확보                             |
+| `restart_delay: 10000`                  | 죽으면 10초 뒤 재시작 (네트워크 복구 여유)                                                |
+| `max_restarts: 10`, `min_uptime: '60s'` | 1분 내 10회 넘게 죽으면 설정 오류로 보고 재시작 포기                                      |
+| `max_memory_restart: '300M'`            | 라즈베리파이 보호용 안전장치 (정상 시 100MB 미만)                                         |
+| `time: false`                           | pino가 이미 타임스탬프를 붙입니다. 켜면 JSON 로그 앞에 텍스트가 붙어 `jq` 파싱이 깨집니다 |
+| `watch: false`                          | 켜면 `data/*.db` 쓰기마다 재시작되어 봇이 사실상 못 돕니다                                |
+| `cwd: __dirname`                        | 앱이 이 경로의 `.env`와 `data/`를 찾습니다                                                |
+
+---
+
+## 14-B. systemd (대안)
+
+<details>
+<summary>pm2 대신 systemd를 쓴다면 펼치세요</summary>
+
+### 14.7 systemd 대안 — 서비스 설치
 
 `install.sh`를 썼다면 이미 끝났습니다. 수동으로 하려면:
 
@@ -775,7 +952,7 @@ ExecStart=/usr/bin/node /opt/yenwatch/dist/index.js   # which node 결과
 sudo nano /etc/systemd/system/yenwatch.service
 ```
 
-### 14.2 활성화 및 시작
+### 14.8 systemd 대안 — 활성화 및 시작
 
 ```bash
 sudo systemctl daemon-reload
@@ -783,7 +960,7 @@ sudo systemctl enable yenwatch
 sudo systemctl start yenwatch
 ```
 
-### 14.3 상태 확인
+### 14.9 systemd 대안 — 상태 확인
 
 ```bash
 sudo systemctl status yenwatch
@@ -800,7 +977,7 @@ sudo systemctl status yenwatch
 
 `enabled`와 `active (running)` 두 가지를 확인하세요.
 
-### 14.4 운영 명령
+### 14.10 systemd 대안 — 운영 명령
 
 ```bash
 sudo systemctl restart yenwatch      # 재시작
@@ -810,7 +987,7 @@ systemctl is-enabled yenwatch        # 자동 실행 여부 확인 -> enabled
 systemctl is-active yenwatch         # 실행 중인지 확인 -> active
 ```
 
-### 14.5 부팅 자동 실행 확인
+### 14.11 systemd 대안 — 부팅 자동 실행 확인
 
 ```bash
 # 1. 등록 확인
@@ -826,7 +1003,7 @@ journalctl -u yenwatch -b            # 이번 부팅의 로그 전체
 
 Discord 채널의 상태 메시지가 계속 갱신되면 정상입니다.
 
-### 14.6 서비스 유닛에서 하는 일
+### 14.12 systemd 대안 — 서비스 유닛에서 하는 일
 
 | 설정                                                               | 이유                                                |
 | ------------------------------------------------------------------ | --------------------------------------------------- |
@@ -837,18 +1014,39 @@ Discord 채널의 상태 메시지가 계속 갱신되면 정상입니다.
 | `NoNewPrivileges` / `ProtectSystem=full` / `ProtectHome=read-only` | 권한 상승 및 시스템 파일 쓰기 차단                  |
 | `ReadWritePaths=/opt/yenwatch/data`                                | DB 디렉터리만 쓰기 허용                             |
 
+</details>
+
 ---
 
 ## 15. 로그 확인
 
 ```bash
-journalctl -u yenwatch -f              # 실시간 (Ctrl+C 로 종료)
+pm2 logs yenwatch                  # 실시간 (Ctrl+C 로 종료)
+pm2 logs yenwatch --lines 100      # 최근 100줄
+pm2 logs yenwatch --err            # 오류 스트림만
+pm2 logs yenwatch --out            # 표준 출력만
+pm2 flush yenwatch                 # 로그 비우기
+```
+
+로그 파일은 프로젝트의 `logs/` 아래에 쌓입니다. (`ecosystem.config.cjs`에서 지정)
+
+```bash
+tail -f /opt/yenwatch/logs/yenwatch-out.log
+tail -f /opt/yenwatch/logs/yenwatch-error.log
+```
+
+<details>
+<summary>systemd 를 쓴다면</summary>
+
+```bash
+journalctl -u yenwatch -f              # 실시간
 journalctl -u yenwatch --since today   # 오늘
-journalctl -u yenwatch --since "1 hour ago"
 journalctl -u yenwatch -n 100          # 최근 100줄
 journalctl -u yenwatch -b              # 이번 부팅 이후 전체
 journalctl -u yenwatch -p err          # 오류만
 ```
+
+</details>
 
 ### 15.1 로그 형식
 
@@ -873,15 +1071,18 @@ journalctl -u yenwatch -p err          # 오류만
 
 `jq`로 보기 좋게 만들 수 있습니다.
 
+`jq`로 보기 좋게 만들 수 있습니다. (`ecosystem.config.cjs`에서 `time: false`로 둔 이유가 이것입니다 — pm2가 시간 접두사를 붙이면 JSON이 깨져 `jq`가 못 읽습니다.)
+
 ```bash
 sudo apt install -y jq
-journalctl -u yenwatch -f -o cat | jq -r '"\(.time) [\(.level)] \(.event // "-") \(.msg)"'
+tail -f logs/yenwatch-out.log | jq -r '"\(.time) [\(.level)] \(.event // "-") \(.msg)"'
 ```
 
 특정 이벤트만 보기:
 
 ```bash
-journalctl -u yenwatch -o cat | jq -c 'select(.event == "rate_collection_failed")'
+jq -c 'select(.event == "rate_collection_failed")' logs/yenwatch-out.log
+jq -c 'select(.event == "rate_collected") | {time, rate, change}' logs/yenwatch-out.log | tail -20
 ```
 
 ### 15.2 이벤트 목록
@@ -904,6 +1105,27 @@ journalctl -u yenwatch -o cat | jq -c 'select(.event == "rate_collection_failed"
 
 ### 15.3 로그 용량 관리
 
+1분마다 로그를 남기므로 회전 설정이 없으면 SD 카드가 금방 찹니다. `install-pm2.sh`가 `pm2-logrotate`를 설치하고 아래 값으로 설정합니다.
+
+```bash
+pm2 install pm2-logrotate                      # 이미 설치돼 있으면 생략
+pm2 set pm2-logrotate:max_size 10M             # 10MB 마다 분할
+pm2 set pm2-logrotate:retain 14                # 14개 보관
+pm2 set pm2-logrotate:compress true            # 오래된 파일 gzip 압축
+
+pm2 conf pm2-logrotate                         # 현재 설정 확인
+```
+
+수동 정리:
+
+```bash
+pm2 flush yenwatch                             # 로그 파일 비우기
+du -sh /opt/yenwatch/logs                      # 용량 확인
+```
+
+<details>
+<summary>systemd 를 쓴다면 (journald)</summary>
+
 ```bash
 sudo journalctl --vacuum-size=200M     # 200MB로 제한
 sudo journalctl --vacuum-time=30d      # 30일 이전 삭제
@@ -915,6 +1137,8 @@ sudo journalctl --vacuum-time=30d      # 30일 이전 삭제
 SystemMaxUse=200M
 MaxRetentionSec=30day
 ```
+
+</details>
 
 ---
 
@@ -937,12 +1161,20 @@ npm run build
 npm test
 
 # 5. 재시작
-sudo systemctl restart yenwatch
+npm run pm2:restart
 
 # 6. 확인
-sudo systemctl status yenwatch
-journalctl -u yenwatch -n 30
+pm2 status
+pm2 logs yenwatch --lines 30
 ```
+
+2~5번을 한 번에 하려면:
+
+```bash
+cd /opt/yenwatch && git pull && npm run deploy:pm2
+```
+
+`deploy:pm2`는 `npm ci` → `npm run build` → `pm2 startOrRestart --update-env` → `pm2 save`를 순서대로 실행합니다.
 
 슬래시 커맨드 정의가 바뀐 업데이트라면 한 번 더 등록하세요.
 
@@ -951,6 +1183,8 @@ npm run discord:register
 ```
 
 > DB 스키마 변경은 앱 시작 시 자동으로 적용됩니다(`PRAGMA user_version` 기반 마이그레이션). 기존 데이터는 유지됩니다.
+>
+> `ecosystem.config.cjs`가 바뀐 업데이트라면 재시작 후 **`pm2 save`**를 실행하세요.
 
 ### 롤백
 
@@ -959,8 +1193,19 @@ cd /opt/yenwatch
 git log --oneline -10          # 되돌아갈 커밋 확인
 git checkout <커밋해시>
 npm ci && npm run build
-sudo systemctl restart yenwatch
+npm run pm2:restart
 ```
+
+<details>
+<summary>systemd 를 쓴다면</summary>
+
+```bash
+sudo systemctl restart yenwatch
+sudo systemctl status yenwatch
+journalctl -u yenwatch -n 30
+```
+
+</details>
 
 ---
 
@@ -1000,10 +1245,10 @@ crontab -e
 확실하게 하고 싶다면 서비스를 멈추고 복사합니다.
 
 ```bash
-sudo systemctl stop yenwatch
+npm run pm2:stop
 cp /opt/yenwatch/data/yenwatch.db \
    /opt/yenwatch/data/yenwatch-$(date +%Y%m%d-%H%M%S).db
-sudo systemctl start yenwatch
+npm run pm2:restart
 ```
 
 > ⚠️ 서비스가 **실행 중일 때** `cp`로 `.db` 파일만 복사하면 WAL에 남은 데이터가 빠질 수 있습니다. 온라인 백업(17.1)을 쓰거나 서비스를 멈추세요.
@@ -1011,7 +1256,7 @@ sudo systemctl start yenwatch
 ### 17.4 복원
 
 ```bash
-sudo systemctl stop yenwatch
+npm run pm2:stop
 
 cd /opt/yenwatch/data
 mv yenwatch.db yenwatch.db.broken
@@ -1019,7 +1264,7 @@ cp backups/yenwatch-20260729-030000.db yenwatch.db
 rm -f yenwatch.db-wal yenwatch.db-shm     # 이전 WAL 잔재 제거
 
 sqlite3 yenwatch.db 'PRAGMA integrity_check;'   # ok 확인
-sudo systemctl start yenwatch
+npm run pm2:restart
 ```
 
 ### 17.5 백업에 포함할 것
@@ -1037,17 +1282,35 @@ sudo systemctl start yenwatch
 ### 봇이 오프라인입니다
 
 ```bash
+pm2 status                            # online 인지, ↺ 재시작 횟수가 늘고 있는지
+pm2 logs yenwatch --err --lines 50
+```
+
+| 증상 / 로그 메시지                       | 원인                                    | 해결                                                      |
+| ---------------------------------------- | --------------------------------------- | --------------------------------------------------------- |
+| `pm2 status` 목록이 비어 있음            | `pm2 save` 를 안 했거나 데몬이 초기화됨 | `pm2 resurrect` → 안 되면 `npm run pm2:start && pm2 save` |
+| `status: errored`, ↺ 가 계속 증가        | 앱이 시작 직후 죽는 중                  | `pm2 logs yenwatch --err` 로 원인 확인                    |
+| `status: stopped`                        | 수동으로 멈춘 상태                      | `npm run pm2:restart`                                     |
+| `환경변수 검증에 실패했습니다`           | `.env` 값 누락/오류                     | `npm run cli -- check` 로 확인                            |
+| `An invalid token was provided`          | 토큰이 틀림                             | Developer Portal에서 Reset Token 후 `.env` 갱신           |
+| `Cannot find module '.../dist/index.js'` | 빌드를 안 함                            | `npm run build && npm run pm2:restart`                    |
+| `Permission denied` on data              | 디렉터리 소유권                         | `sudo chown -R $USER:$USER /opt/yenwatch/data`            |
+| `.env` 를 고쳤는데 반영 안 됨            | pm2 가 이전 환경변수를 유지             | `npm run pm2:restart` (`--update-env` 포함)               |
+
+<details>
+<summary>systemd 를 쓴다면</summary>
+
+```bash
 sudo systemctl status yenwatch
 journalctl -u yenwatch -n 50
 ```
 
-| 로그 메시지                     | 원인                | 해결                                            |
-| ------------------------------- | ------------------- | ----------------------------------------------- |
-| `환경변수 검증에 실패했습니다`  | `.env` 값 누락/오류 | `npm run cli -- check` 로 확인                  |
-| `An invalid token was provided` | 토큰이 틀림         | Developer Portal에서 Reset Token 후 `.env` 갱신 |
-| `status=203/EXEC`               | node 경로가 틀림    | `which node` 결과로 `ExecStart` 수정            |
-| `status=217/USER`               | 사용자가 없음       | `User=` 를 `whoami` 결과로 수정                 |
-| `Permission denied` on data     | 디렉터리 소유권     | `sudo chown -R $USER:$USER /opt/yenwatch/data`  |
+| 로그 메시지       | 원인             | 해결                                 |
+| ----------------- | ---------------- | ------------------------------------ |
+| `status=203/EXEC` | node 경로가 틀림 | `which node` 결과로 `ExecStart` 수정 |
+| `status=217/USER` | 사용자가 없음    | `User=` 를 `whoami` 결과로 수정      |
+
+</details>
 
 ### 상태 메시지가 안 보입니다
 
@@ -1059,7 +1322,7 @@ journalctl -u yenwatch -n 50
    npm run check
    ```
 
-4. 메시지를 실수로 지웠다면 — 다음 수집(1분 이내)에 자동으로 새로 만듭니다. 즉시 원하면 `sudo systemctl restart yenwatch`
+4. 메시지를 실수로 지웠다면 — 다음 수집(1분 이내)에 자동으로 새로 만듭니다. 즉시 원하면 `npm run pm2:restart`
 
 ### 슬래시 커맨드가 안 뜹니다
 
@@ -1079,7 +1342,7 @@ npm run discord:register
 
 ```bash
 npm run cli -- set DISCORD_ALLOWED_USER_IDS 123456789012345678
-sudo systemctl restart yenwatch
+npm run pm2:restart
 ```
 
 여러 명이면 쉼표로 구분합니다: `111...,222...`
@@ -1103,7 +1366,7 @@ npm run cli -- scrape     # 네트워크 + 파서만 단독 테스트
 로그에 어떤 파서가 왜 실패했는지 전부 남습니다.
 
 ```bash
-journalctl -u yenwatch -o cat | jq -c 'select(.event == "rate_parse_failed")'
+jq -c 'select(.event == "rate_parse_failed")' /opt/yenwatch/logs/yenwatch-out.log
 ```
 
 ```json
@@ -1146,7 +1409,7 @@ sqlite3 /opt/yenwatch/data/yenwatch.db 'PRAGMA integrity_check;'
 
 ```bash
 ps aux | grep '[y]enwatch\|[d]ist/index.js'
-sudo systemctl restart yenwatch
+npm run pm2:restart
 ```
 
 ### 디스크가 가득 찼습니다
@@ -1156,14 +1419,14 @@ df -h
 du -sh /opt/yenwatch/data/*
 
 npm run cli -- retention              # 오래된 데이터 즉시 정리
-sudo journalctl --vacuum-size=200M    # 로그 정리
+pm2 flush yenwatch                    # 로그 정리
 ```
 
 보존 기간을 줄이려면:
 
 ```bash
 npm run cli -- set DATA_RETENTION_DAYS 90
-sudo systemctl restart yenwatch
+npm run pm2:restart
 ```
 
 > 참고: 1분 간격으로 1년이면 약 52만 행, 대략 30–50MB 수준입니다.
@@ -1173,7 +1436,7 @@ sudo systemctl restart yenwatch
 ```bash
 timedatectl                       # Time zone: Asia/Seoul (KST, +0900)
 sudo timedatectl set-timezone Asia/Seoul
-sudo systemctl restart yenwatch
+npm run pm2:restart
 ```
 
 저장은 항상 UTC(ISO 8601)이고 표시만 Asia/Seoul로 변환하므로, 시간대를 바꿔도 기존 데이터는 안전합니다.
@@ -1210,7 +1473,7 @@ ls -l /opt/yenwatch/.env       # -rw------- 확인
 
 - Discord: Developer Portal → Bot → **Reset Token**
 - Notion: my-integrations → **Rotate secret**
-- `.env` 갱신 후 `sudo systemctl restart yenwatch`
+- `.env` 갱신 후 `npm run pm2:restart`
 
 ### 코드에서 지키는 것
 
@@ -1250,6 +1513,6 @@ MIT License — 자세한 내용은 [LICENSE](./LICENSE)를 참고하세요.
 
 <div align="center">
 
-**문제가 생겼나요?** → [18. 장애 해결](#18-장애-해결) · `npm run check` · `journalctl -u yenwatch -f`
+**문제가 생겼나요?** → [18. 장애 해결](#18-장애-해결) · `npm run check` · `pm2 logs yenwatch`
 
 </div>

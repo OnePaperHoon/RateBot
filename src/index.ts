@@ -19,6 +19,30 @@ import { APP_VERSION } from './version.js';
 /** 종료 절차가 끝나지 않아도 이 시간이 지나면 강제 종료한다 (systemd TimeoutStopSec 대비). */
 const FORCE_EXIT_TIMEOUT_MS = 25_000;
 
+/** 정리가 끝난 뒤 이벤트 루프가 비워지길 기다리는 유예 시간. */
+const DRAIN_GRACE_MS = 3_000;
+
+/**
+ * 종료 코드를 정하고 프로세스가 **반드시** 끝나게 만든다.
+ *
+ * 두 가지 실패 모드를 동시에 막는다:
+ *  1. `process.exit()` 즉시 호출 → 핸들 정리 중에 죽어 마지막 로그가 유실되거나
+ *     libuv 가 assertion 으로 터진다.
+ *  2. `exitCode` 만 설정 → 정리되지 않은 핸들(소켓 등)이 남으면 프로세스가
+ *     영원히 살아 있고, 봇은 죽었는데 pm2/systemd 는 "online" 으로 본다.
+ *     이 경우 자동 재시작이 아예 동작하지 않아 가장 위험하다.
+ *
+ * unref 된 타이머라 루프가 스스로 비면 발동하지 않고 깨끗하게 끝나며,
+ * 핸들이 남아 루프가 살아 있으면 유예 시간 뒤 강제 종료한다.
+ */
+function exitWhenDrained(code: number, graceMs = DRAIN_GRACE_MS): void {
+  process.exitCode = code;
+  const forced = setTimeout(() => {
+    process.exit(code);
+  }, graceMs);
+  forced.unref();
+}
+
 async function main(): Promise<void> {
   // 1. 환경변수 — 로거보다 먼저 필요하므로 여기서 검증한다.
   let env;
@@ -47,11 +71,9 @@ async function main(): Promise<void> {
   /**
    * 종료 처리.
    *
-   * `process.exit()` 를 즉시 호출하지 않고 `exitCode` 만 설정한 뒤
-   * 이벤트 루프가 자연스럽게 비워지길 기다린다.
-   * (열려 있는 핸들이 정리되는 도중 강제 종료하면 libuv 가 죽거나
-   *  마지막 로그가 유실될 수 있다.)
-   * 그래도 끝나지 않으면 워치독이 강제 종료한다.
+   * 정리를 모두 마친 뒤 `exitWhenDrained()` 로 넘긴다.
+   * 루프가 스스로 비면 깨끗이 끝나고, 남은 핸들이 있으면 유예 후 강제 종료한다.
+   * 정리 자체가 걸리는 경우는 아래 워치독이 처리한다.
    */
   const shutdown = async (signal: string, exitCode = 0): Promise<void> => {
     if (exiting) return;
@@ -70,7 +92,7 @@ async function main(): Promise<void> {
       log.error({ err: error }, '종료 절차 중 오류');
     } finally {
       clearTimeout(forceTimer);
-      process.exitCode = exitCode;
+      exitWhenDrained(exitCode);
     }
   };
 
@@ -99,8 +121,9 @@ async function main(): Promise<void> {
     }
     exiting = true;
     await app.shutdown('startup_failure');
-    // 여기서도 강제 종료하지 않는다 — 핸들이 정리되면 exitCode 1 로 자연 종료된다.
-    process.exitCode = 1;
+    // 반드시 종료되어야 한다. 살아만 있고 아무 일도 안 하면
+    // pm2/systemd 가 "정상" 으로 오해해 재시작조차 하지 않는다.
+    exitWhenDrained(1);
   }
 }
 

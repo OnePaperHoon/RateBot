@@ -32,37 +32,62 @@ export interface LoginOptions {
   readonly timeoutMs?: number;
 }
 
-/** 로그인 후 ready 상태가 될 때까지 대기한다. */
+/**
+ * 로그인 후 ready 상태가 될 때까지 대기한다.
+ *
+ * 주의: `login()` 이 먼저 실패하면 `ready` 는 아무도 await 하지 않는 상태로 남는다.
+ * 이때 타임아웃 타이머나 error 이벤트가 그 promise 를 reject 하면
+ * unhandledRejection 이 되어 로그가 오염된다. 그래서
+ *   · 실패 경로에서 타이머와 리스너를 즉시 정리하고
+ *   · `ready` 에 미리 no-op catch 를 붙여 둔다.
+ */
 export async function loginAndWaitReady(
   client: Client,
   options: LoginOptions,
 ): Promise<Client<true>> {
   const timeoutMs = options.timeoutMs ?? 30_000;
 
-  const ready = new Promise<Client<true>>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new DiscordConfigError(`Discord ready 이벤트가 ${timeoutMs}ms 안에 오지 않았습니다`));
-    }, timeoutMs);
-    timer.unref?.();
+  let cleanup = (): void => {};
 
-    client.once(Events.ClientReady, (readyClient) => {
-      clearTimeout(timer);
+  const ready = new Promise<Client<true>>((resolve, reject) => {
+    const onReady = (readyClient: Client<true>): void => {
+      cleanup();
       log.info(
         { event: LogEvent.DISCORD_CONNECTED, tag: readyClient.user.tag, id: readyClient.user.id },
         'Discord 로그인 완료',
       );
       resolve(readyClient);
-    });
+    };
 
-    client.once(Events.Error, (error) => {
-      clearTimeout(timer);
+    const onError = (error: Error): void => {
+      cleanup();
       reject(error);
-    });
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new DiscordConfigError(`Discord ready 이벤트가 ${timeoutMs}ms 안에 오지 않았습니다`));
+    }, timeoutMs);
+    timer.unref?.();
+
+    cleanup = () => {
+      clearTimeout(timer);
+      client.off(Events.ClientReady, onReady);
+      client.off(Events.Error, onError);
+    };
+
+    client.once(Events.ClientReady, onReady);
+    client.once(Events.Error, onError);
   });
+
+  // login 실패로 아무도 await 하지 않게 되더라도 unhandledRejection 이 되지 않게 한다.
+  // (호출부가 await 하면 거부는 그대로 전달된다)
+  ready.catch(() => undefined);
 
   try {
     await client.login(options.token);
   } catch (error) {
+    cleanup();
     throw new DiscordConfigError(
       'Discord 로그인 실패 — DISCORD_TOKEN 이 올바른지 확인하세요 ' +
         '(Developer Portal > Bot > Reset Token)',

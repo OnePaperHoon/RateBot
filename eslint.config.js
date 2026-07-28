@@ -41,5 +41,23 @@ export default tseslint.config(
       'no-console': 'off',
     },
   },
+  {
+    // pm2 설정은 CommonJS 여야 한다 (package.json 의 "type": "module" 때문에 .cjs 사용).
+    // Node 전역과 require 를 허용한다.
+    files: ['**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        module: 'writable',
+        require: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+        process: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
   prettier,
 );
