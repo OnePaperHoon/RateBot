@@ -91,6 +91,33 @@ export class StatusMessageManager {
     return this.#createMessage(embed);
   }
 
+  /**
+   * 상태 메시지를 지우고 채널 맨 아래에 새로 만든다.
+   *
+   * 대화가 쌓여 보드가 위로 밀려났을 때 `/yen-board` 로 다시 끌어내리는 용도다.
+   * 기존 메시지 삭제가 실패해도(권한 부족, 이미 삭제됨) 새 메시지 생성은 진행한다.
+   */
+  async repost(embed: EmbedBuilder): Promise<Message> {
+    let existing: Message | null = null;
+    try {
+      existing = await this.#resolveMessage();
+    } catch (error) {
+      // 조회 실패는 치명적이지 않다 — 어차피 새로 만든다.
+      log.warn({ err: error }, '기존 상태 메시지 조회 실패 (새로 생성합니다)');
+    }
+
+    if (existing !== null) {
+      try {
+        await existing.delete();
+      } catch (error) {
+        log.warn({ err: error, messageId: existing.id }, '기존 상태 메시지 삭제 실패 (무시)');
+      }
+    }
+
+    this.#forget();
+    return this.#createMessage(embed);
+  }
+
   /** 별도 알림(경고/복구)을 새 메시지로 보낸다. 상태 메시지와 섞이지 않는다. */
   async sendNotice(embed: EmbedBuilder): Promise<Message> {
     const channel = await fetchTargetChannel(this.#client, this.#channelId);

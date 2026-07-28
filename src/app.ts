@@ -16,7 +16,13 @@ import { SettingsRepository } from './database/settingsRepository.js';
 import { NaverJpyScraper } from './scraper/naverJpyScraper.js';
 
 import { createDiscordClient, destroyClient, loginAndWaitReady } from './discord/client.js';
-import { handleInteraction, type CommandDeps } from './discord/commands.js';
+import {
+  handleAlertRemoveMenu,
+  handleInteraction,
+  ALERT_REMOVE_MENU_ID,
+  type CommandDeps,
+} from './discord/commands.js';
+import { buildStatusEmbed } from './discord/embeds.js';
 import { StatusMessageManager } from './discord/statusMessage.js';
 
 import {
@@ -186,11 +192,37 @@ export class YenWatchApp {
         sqliteHealthy: () => this.#isSqliteHealthy(),
         nextCollectionAt: () => scheduler.nextRunAt(),
       },
+      statusBoard: {
+        // 정기 갱신과 같은 Embed 를 써야 재생성 직후 모습이 달라지지 않는다.
+        repost: async () => {
+          const health = healthService.snapshot();
+          const embed = buildStatusEmbed(rateService.getLastKnownSnapshot(), {
+            staleAfterMinutes: env.STALE_AFTER_MINUTES,
+            scrapeIntervalSeconds: env.SCRAPE_INTERVAL_SECONDS,
+            lastFailureAt: health.lastFailureAt,
+            lastFailureReason: health.lastFailureReason,
+            consecutiveFailures: health.consecutiveFailures,
+          });
+          const message = await statusMessage.repost(embed);
+          return { messageId: message.id, channelId: message.channelId };
+        },
+      },
     };
 
     discord.on(Events.InteractionCreate, (interaction) => {
-      if (!interaction.isChatInputCommand()) return;
-      void handleInteraction(interaction, commandDeps);
+      if (interaction.isChatInputCommand()) {
+        void handleInteraction(interaction, commandDeps);
+        return;
+      }
+      // `/yen-alert list` 의 삭제 드롭다운
+      if (
+        interaction.isStringSelectMenu() &&
+        interaction.customId.startsWith(ALERT_REMOVE_MENU_ID)
+      ) {
+        void handleAlertRemoveMenu(interaction, commandDeps).catch((error: unknown) => {
+          log.error({ event: 'alert_menu_failed', err: error }, '알림 삭제 드롭다운 처리 실패');
+        });
+      }
     });
 
     discord.on(Events.Error, (error) => {

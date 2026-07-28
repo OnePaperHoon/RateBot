@@ -1,15 +1,20 @@
 import {
+  ActionRowBuilder,
   MessageFlags,
   SlashCommandBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   type ChatInputCommandInteraction,
   type Client,
   type RESTPostAPIChatInputApplicationCommandsJSONBody,
+  type StringSelectMenuInteraction,
 } from 'discord.js';
 import { childLogger } from '../logger.js';
 import {
   MAX_ALERTS_PER_USER,
   type AlertDirection,
   type AlertRepository,
+  type RateAlert,
 } from '../database/alertRepository.js';
 import type { ExchangeRateService, HistoryPeriod } from '../services/exchangeRateService.js';
 import { HISTORY_PERIODS } from '../services/exchangeRateService.js';
@@ -23,6 +28,7 @@ import {
   buildHistoryEmbed,
   buildStatusCommandEmbed,
   formatAlertCondition,
+  formatIntervalLabel,
 } from './embeds.js';
 
 const log = childLogger('discord-commands');
@@ -54,6 +60,11 @@ export interface CommandDeps {
     readonly notionConnected: () => boolean | null;
     readonly sqliteHealthy: () => boolean;
     readonly nextCollectionAt: () => string | null;
+  };
+  /** 자동 갱신 상태 보드 제어 (app.ts 에서 주입). */
+  readonly statusBoard: {
+    /** 보드를 지우고 채널 맨 아래에 다시 만든다. */
+    readonly repost: () => Promise<{ messageId: string; channelId: string }>;
   };
 }
 
@@ -403,15 +414,148 @@ function isAlreadyMet(direction: AlertDirection, target: number, current: number
   return direction === 'below' ? current <= target : current >= target;
 }
 
+/** 선택 메뉴 customId 접두사. `yen-alert:remove:<요청자 ID>` 형태. */
+export const ALERT_REMOVE_MENU_ID = 'yen-alert:remove';
+
+/** Discord 선택 메뉴 옵션 상한. */
+const SELECT_MENU_MAX_OPTIONS = 25;
+
+function canDelete(
+  alert: { createdBy: string },
+  userId: string,
+  allowedUserIds: readonly string[],
+): boolean {
+  return alert.createdBy === userId || allowedUserIds.includes(userId);
+}
+
+/**
+ * 삭제용 드롭다운을 만든다.
+ *
+ * 지울 수 있는 알림만 넣는다 — 고를 수는 있는데 눌러보니 거부되는 UX 를 피한다.
+ * 삭제 권한이 없으면 null 을 반환해 메뉴 자체를 붙이지 않는다.
+ */
+export function buildAlertRemoveMenu(
+  alerts: readonly RateAlert[],
+  userId: string,
+  allowedUserIds: readonly string[],
+): ActionRowBuilder<StringSelectMenuBuilder> | null {
+  const deletable = alerts
+    .filter((alert) => canDelete(alert, userId, allowedUserIds))
+    .slice(0, SELECT_MENU_MAX_OPTIONS);
+
+  if (deletable.length === 0) return null;
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`${ALERT_REMOVE_MENU_ID}:${userId}`)
+    .setPlaceholder('🗑️ 삭제할 알림 선택 (여러 개 가능)')
+    .setMinValues(1)
+    .setMaxValues(deletable.length)
+    .addOptions(
+      deletable.map((alert) => {
+        const details = [
+          alert.enabled ? (alert.armed ? '감시 중' : '발동됨') : '종료',
+          `→ 멘션 대상 ${alert.mentionUserId === userId ? '나' : '타인'}`,
+          alert.once ? '1회성' : null,
+          alert.label,
+        ]
+          .filter((part): part is string => Boolean(part))
+          .join(' · ');
+
+        return new StringSelectMenuOptionBuilder()
+          .setLabel(
+            truncateOption(
+              `#${alert.id}  ${formatAlertCondition(alert.direction, alert.targetRate)}`,
+            ),
+          )
+          .setDescription(truncateOption(details))
+          .setValue(String(alert.id));
+      }),
+    );
+
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+/** Discord 선택 메뉴의 label/description 은 100자 제한. */
+function truncateOption(value: string): string {
+  return value.length <= 100 ? value : `${value.slice(0, 99)}…`;
+}
+
 async function handleAlertList(
   interaction: ChatInputCommandInteraction,
   deps: CommandDeps,
 ): Promise<void> {
   const alerts = deps.alertRepository.findAll();
   const snapshot = deps.rateService.getLastKnownSnapshot();
+  const menu = buildAlertRemoveMenu(alerts, interaction.user.id, deps.config.allowedUserIds);
+
   await interaction.reply({
     embeds: [buildAlertListEmbed(alerts, snapshot?.rate ?? null)],
+    components: menu ? [menu] : [],
     flags: MessageFlags.Ephemeral,
+  });
+}
+
+/**
+ * `/yen-alert list` 의 삭제 드롭다운 처리.
+ *
+ * 목록 자체가 ephemeral 이라 다른 사람에게는 보이지 않지만,
+ * customId 에 요청자 ID 를 넣어 한 번 더 확인한다.
+ */
+export async function handleAlertRemoveMenu(
+  interaction: StringSelectMenuInteraction,
+  deps: CommandDeps,
+): Promise<void> {
+  const ownerId = interaction.customId.split(':')[2];
+  if (ownerId !== interaction.user.id) {
+    await interaction.reply({
+      content: '본인이 연 목록에서만 삭제할 수 있습니다. `/yen-alert list` 를 다시 실행하세요.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const ids = interaction.values
+    .map((value) => Number.parseInt(value, 10))
+    .filter((id) => Number.isInteger(id));
+
+  const deleted: number[] = [];
+  const denied: number[] = [];
+  const missing: number[] = [];
+
+  for (const id of ids) {
+    const alert = deps.alertRepository.findById(id);
+    if (!alert) {
+      missing.push(id);
+      continue;
+    }
+    if (!canDelete(alert, interaction.user.id, deps.config.allowedUserIds)) {
+      denied.push(id);
+      continue;
+    }
+    deps.alertRepository.delete(id);
+    deleted.push(id);
+  }
+
+  log.info(
+    { event: 'alert_deleted_via_menu', deleted, denied, missing, userId: interaction.user.id },
+    '드롭다운으로 알림 삭제',
+  );
+
+  // 남은 목록으로 메시지를 갱신한다 — 삭제 결과를 바로 눈으로 확인할 수 있다.
+  const remaining = deps.alertRepository.findAll();
+  const snapshot = deps.rateService.getLastKnownSnapshot();
+  const menu = buildAlertRemoveMenu(remaining, interaction.user.id, deps.config.allowedUserIds);
+
+  const notes: string[] = [];
+  if (deleted.length > 0) notes.push(`🗑️ **${deleted.map((id) => `#${id}`).join(', ')}** 삭제됨`);
+  if (denied.length > 0) notes.push(`⛔ ${denied.map((id) => `#${id}`).join(', ')} — 권한 없음`);
+  if (missing.length > 0)
+    notes.push(`❓ ${missing.map((id) => `#${id}`).join(', ')} — 이미 삭제됨`);
+
+  await interaction.update({
+    content: notes.join('\n'),
+    embeds: [buildAlertListEmbed(remaining, snapshot?.rate ?? null)],
+    components: menu ? [menu] : [],
   });
 }
 
@@ -450,6 +594,64 @@ async function handleAlertRemove(
   });
 }
 
+// --------------------------------------------------------- /yen-board
+
+/** `/yen-board` 쿨다운 — 보드를 지웠다 다시 만드는 동작이라 연타를 막는다. */
+export const BOARD_COOLDOWN_MS = 30_000;
+
+const boardCooldowns = new Map<string, number>();
+
+/** 테스트/재시작 시 쿨다운 초기화. */
+export function resetBoardCooldowns(): void {
+  boardCooldowns.clear();
+}
+
+const yenBoardCommand: SlashCommand = {
+  data: new SlashCommandBuilder()
+    .setName('yen-board')
+    .setDescription('자동 갱신되는 환율 보드를 채널 맨 아래에 다시 띄웁니다')
+    .toJSON(),
+
+  async execute(interaction, deps) {
+    const userId = interaction.user.id;
+    const now = Date.now();
+    const lastUsed = boardCooldowns.get(userId);
+
+    if (lastUsed !== undefined && now - lastUsed < BOARD_COOLDOWN_MS) {
+      await interaction.reply({
+        content: `쿨다운 중입니다. ${formatDuration(BOARD_COOLDOWN_MS - (now - lastUsed))} 후에 다시 시도하세요.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    boardCooldowns.set(userId, now);
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      const { messageId, channelId } = await deps.statusBoard.repost();
+      const link =
+        interaction.guildId === null
+          ? ''
+          : `\nhttps://discord.com/channels/${interaction.guildId}/${channelId}/${messageId}`;
+
+      await interaction.editReply({
+        content:
+          `✅ 환율 보드를 <#${channelId}> 맨 아래에 다시 띄웠습니다.` +
+          `\n이 메시지가 ${formatIntervalLabel(deps.config.scrapeIntervalSeconds)} 자동으로 갱신됩니다.` +
+          link,
+      });
+    } catch (error) {
+      log.error({ event: 'board_repost_failed', err: error }, '환율 보드 재생성 실패');
+      await interaction.editReply({
+        content:
+          '❌ 보드를 다시 만들지 못했습니다.\n' +
+          '봇에게 해당 채널의 **메시지 보내기 / 링크 첨부 / 메시지 관리** 권한이 있는지 확인하세요.',
+      });
+    }
+  },
+};
+
 // ---------------------------------------------------------------------
 
 export const SLASH_COMMANDS: readonly SlashCommand[] = [
@@ -458,6 +660,7 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   yenStatusCommand,
   yenRefreshCommand,
   yenAlertCommand,
+  yenBoardCommand,
 ];
 
 /** Discord 에 등록할 커맨드 정의(JSON) 목록. */
