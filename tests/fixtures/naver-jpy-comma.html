@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=euc-kr" />
+    <title>일본 JPY : 네이버 금융</title>
+  </head>
+  <body>
+    <!--
+      엔화가 100엔당 1,000원을 넘어선 상황을 재현한 fixture.
+      네이버는 천 단위에 쉼표 span 을 넣는다.
+    -->
+    <div id="content">
+      <div class="spot">
+        <div class="today">
+          <p class="no_today">
+            <em class="no_up">
+              <em class="no_up">
+                <span class="no1">1</span><span class="comma">,</span><span class="no0">0</span
+                ><span class="no4">4</span><span class="no6">6</span><span class="jum">.</span
+                ><span class="no3">3</span><span class="no2">2</span>
+              </em>
+            </em>
+            <span class="txt_won">원</span>
+          </p>
+          <p class="no_exday">
+            <span class="txt_comparison">전일대비</span>
+            <em class="no_up">
+              <span class="ico up"></span>
+              <span class="no1">1</span><span class="jum">.</span><span class="no2">2</span
+              ><span class="no4">4</span>
+            </em>
+          </p>
+        </div>
+        <div class="exchange_info">
+          <span class="date">2026.07.29 23:45</span>
+          <span class="standard">하나은행</span>
+        </div>
+      </div>
+      <div class="section_calculator">
+        <select>
+          <option value="1" label="1">대한민국 원 KRW</option>
+          <option value="10.4632" label="100" selected="selected"> 일본 엔 JPY</option>
+        </select>
+      </div>
+    </div>
+  </body>
+</html>

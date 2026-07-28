@@ -1,0 +1,21 @@
+# 기본: 텍스트 파일은 저장소에 LF 로 정규화한다.
+* text=auto eol=lf
+
+# 라즈베리파이에서 실행되는 파일은 반드시 LF 여야 한다.
+# (CRLF 가 섞이면 bash 가 `\r: command not found` 로 실패한다)
+*.sh        text eol=lf
+*.service   text eol=lf
+.env.example text eol=lf
+
+# 바이너리 취급
+*.db        binary
+*.png       binary
+*.jpg       binary
+*.ico       binary
+
+# 실제 응답을 그대로 보존해야 하는 테스트 fixture
+tests/fixtures/*.html -text
+
+# GitHub 언어 통계 및 diff 처리
+package-lock.json  -diff linguist-generated=true
+dist/**            linguist-generated=true
