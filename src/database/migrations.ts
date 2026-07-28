@@ -65,6 +65,39 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'rate_alerts',
+    up(db) {
+      // 목표 환율 도달 알림.
+      //
+      // `armed` 가 핵심이다. 조건을 만족해도 armed=0 이면 발송하지 않는다.
+      // 발송 직후 armed=0 으로 내리고, 환율이 목표선에서 충분히 벗어나야
+      // 다시 armed=1 이 된다. 이 히스테리시스가 없으면 환율이 경계선 근처에서
+      // 오르내릴 때 매분 멘션이 날아간다.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS rate_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_rate REAL NOT NULL,
+            direction TEXT NOT NULL CHECK (direction IN ('below', 'above')),
+            mention_user_id TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            label TEXT,
+            once INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            armed INTEGER NOT NULL DEFAULT 1,
+            trigger_count INTEGER NOT NULL DEFAULT 0,
+            last_triggered_at TEXT,
+            last_triggered_rate REAL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rate_alerts_active
+            ON rate_alerts(enabled, armed);
+      `);
+    },
+  },
 ];
 
 /** 현재 스키마 버전. */

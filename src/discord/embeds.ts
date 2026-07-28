@@ -1,4 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
+import type { AlertDirection, RateAlert } from '../database/alertRepository.js';
 import type { RangeStats, RateSnapshot } from '../types/exchangeRate.js';
 import type { HealthSnapshot } from '../services/healthService.js';
 import {
@@ -255,6 +256,7 @@ export interface StatusCommandInfo {
   readonly sqlitePath: string;
   readonly nextCollectionAt: string | null;
   readonly collecting: boolean;
+  readonly activeAlerts: number;
 }
 
 /** `/yen-status` 응답 Embed (ephemeral). */
@@ -315,6 +317,11 @@ export function buildStatusCommandEmbed(info: StatusCommandInfo): EmbedBuilder {
         inline: true,
       },
       {
+        name: '등록된 알림',
+        value: info.activeAlerts > 0 ? `🔔 ${info.activeAlerts}개 감시 중` : '없음',
+        inline: true,
+      },
+      {
         name: '다음 수집 예정',
         value: info.nextCollectionAt
           ? `${formatSeoul(info.nextCollectionAt)}\n(${discordTimestamp(info.nextCollectionAt, 'R')})`
@@ -369,6 +376,104 @@ export function buildRecoveryEmbed(snapshot: RateSnapshot): EmbedBuilder {
       `환율 수집이 정상으로 돌아왔습니다.\n**100 JPY = ${formatRate(snapshot.rate)} KRW**`,
     )
     .addFields({ name: '수집 시각', value: formatSeoul(snapshot.collectedAt), inline: false })
+    .setTimestamp(new Date());
+}
+
+// ------------------------------------------------------- 목표 환율 알림
+
+/** `940 이하` / `960 이상` 형태의 조건 문구. */
+export function formatAlertCondition(direction: AlertDirection, targetRate: number): string {
+  return direction === 'below'
+    ? `${formatRate(targetRate)} KRW 이하`
+    : `${formatRate(targetRate)} KRW 이상`;
+}
+
+/** 알림 발동 메시지. 실제 멘션은 message content 로 따로 붙인다. */
+export function buildAlertEmbed(alert: RateAlert, snapshot: RateSnapshot): EmbedBuilder {
+  const reached =
+    alert.direction === 'below' ? '목표가 이하로 내려갔습니다' : '목표가 이상으로 올라갔습니다';
+
+  const embed = new EmbedBuilder()
+    .setTitle('💸 환전 타이밍입니다!!!!!')
+    .setColor(alert.direction === 'below' ? COLOR_DOWN : COLOR_UP)
+    .setDescription(`**100 JPY = ${formatRate(snapshot.rate)} KRW**\n${reached}`)
+    .addFields(
+      {
+        name: '목표 조건',
+        value: formatAlertCondition(alert.direction, alert.targetRate),
+        inline: true,
+      },
+      {
+        name: '현재 환율',
+        value: `${formatRate(snapshot.rate)} KRW`,
+        inline: true,
+      },
+      {
+        name: '오늘 범위',
+        value: `${formatRate(snapshot.dailyLow)} ~ ${formatRate(snapshot.dailyHigh)} KRW`,
+        inline: true,
+      },
+      {
+        name: '수집 시각',
+        value: `${formatSeoul(snapshot.collectedAt)}\n${discordTimestamp(snapshot.collectedAt, 'R')}`,
+        inline: false,
+      },
+    )
+    .setTimestamp(new Date());
+
+  if (alert.label) {
+    embed.addFields({ name: '메모', value: truncate(alert.label, 200), inline: false });
+  }
+
+  embed.setFooter({
+    text: alert.once
+      ? `알림 #${alert.id} · 1회성이므로 이 알림은 종료됩니다`
+      : `알림 #${alert.id} · 목표선에서 벗어나면 다시 감시합니다`,
+  });
+
+  return embed;
+}
+
+/** `/yen-alert list` 응답. */
+export function buildAlertListEmbed(alerts: readonly RateAlert[], currentRate: number | null) {
+  if (alerts.length === 0) {
+    return new EmbedBuilder()
+      .setTitle('🔔 등록된 환율 알림')
+      .setColor(COLOR_FLAT)
+      .setDescription(
+        '등록된 알림이 없습니다.\n`/yen-alert add rate:940 direction:아래로` 처럼 추가하세요.',
+      );
+  }
+
+  const lines = alerts.map((alert) => {
+    const state = !alert.enabled
+      ? '⏹️ 종료'
+      : alert.armed
+        ? '🟢 감시 중'
+        : '🔕 발동됨(재무장 대기)';
+    const target = formatAlertCondition(alert.direction, alert.targetRate);
+    const mention = `<@${alert.mentionUserId}>`;
+    const extras: string[] = [];
+    if (alert.once) extras.push('1회성');
+    if (alert.triggerCount > 0) extras.push(`${alert.triggerCount}회 발동`);
+    if (alert.label) extras.push(truncate(alert.label, 40));
+
+    return [
+      `**#${alert.id}** ${target} → ${mention}`,
+      `└ ${state}${extras.length > 0 ? ` · ${extras.join(' · ')}` : ''}`,
+    ].join('\n');
+  });
+
+  return new EmbedBuilder()
+    .setTitle('🔔 등록된 환율 알림')
+    .setColor(COLOR_OK)
+    .setDescription(lines.join('\n\n'))
+    .setFooter({
+      text:
+        currentRate === null
+          ? '삭제: /yen-alert remove id:<번호>'
+          : `현재 ${formatRate(currentRate)} KRW · 삭제: /yen-alert remove id:<번호>`,
+    })
     .setTimestamp(new Date());
 }
 

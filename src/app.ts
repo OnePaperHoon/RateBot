@@ -7,6 +7,7 @@ import { NotionSchemaError, toError } from './errors.js';
 import { childLogger, LogEvent } from './logger.js';
 import { APP_VERSION } from './version.js';
 
+import { AlertRepository } from './database/alertRepository.js';
 import { closeDatabase, openDatabase } from './database/client.js';
 import { HealthRepository } from './database/healthRepository.js';
 import { RateRepository } from './database/rateRepository.js';
@@ -27,6 +28,7 @@ import { NotionHistoryRepository } from './notion/historyRepository.js';
 import { NotionStatusRepository } from './notion/statusRepository.js';
 import { HISTORY_PROPERTIES, STATUS_PROPERTIES } from './notion/schema.js';
 
+import { AlertService } from './services/alertService.js';
 import { ExchangeRateService } from './services/exchangeRateService.js';
 import { HealthService } from './services/healthService.js';
 import { NotificationService } from './services/notificationService.js';
@@ -53,6 +55,7 @@ export class YenWatchApp {
   #discord: Client | null = null;
 
   #rateService: ExchangeRateService | null = null;
+  #alertService: AlertService | null = null;
   #healthService: HealthService | null = null;
   #notifications: NotificationService | null = null;
   #scheduler: SchedulerService | null = null;
@@ -88,6 +91,7 @@ export class YenWatchApp {
     const rates = new RateRepository(db);
     const settings = new SettingsRepository(db);
     const healthRepo = new HealthRepository(db);
+    const alertRepo = new AlertRepository(db);
 
     // ---------- 2. 도메인 서비스 ----------
     const scraper = new NaverJpyScraper({
@@ -107,6 +111,12 @@ export class YenWatchApp {
     });
     healthService.hydrateFromLastRecord(rates.findLatest()?.collectedAt ?? null);
     this.#healthService = healthService;
+
+    this.#alertService = new AlertService({
+      alerts: alertRepo,
+      health: healthRepo,
+      rearmMarginKrw: env.ALERT_REARM_MARGIN_KRW,
+    });
 
     // ---------- 3. Discord ----------
     const discord = createDiscordClient();
@@ -160,6 +170,7 @@ export class YenWatchApp {
     const commandDeps: CommandDeps = {
       rateService,
       healthService,
+      alertRepository: alertRepo,
       runCollection: (trigger) => this.#runCollectionCycle(trigger),
       config: {
         staleAfterMinutes: env.STALE_AFTER_MINUTES,
@@ -167,6 +178,8 @@ export class YenWatchApp {
         allowedUserIds: env.DISCORD_ALLOWED_USER_IDS,
         sqlitePath: env.SQLITE_PATH,
         notionEnabled: env.NOTION_ENABLED,
+        minValidRate: env.MIN_VALID_JPY100_KRW,
+        maxValidRate: env.MAX_VALID_JPY100_KRW,
       },
       status: {
         notionConnected: () => notifications.notionConnected(),
@@ -222,6 +235,17 @@ export class YenWatchApp {
       if (action === 'send-recovery') {
         await notifications.sendRecovery(outcome.snapshot);
       }
+
+      // 목표 환율 알림 — 상태 메시지 갱신과 독립적으로 처리한다.
+      // 평가는 DB 만 건드리므로 실패해도 수집 결과에 영향이 없다.
+      const alertService = this.#alertService;
+      if (alertService) {
+        const triggers = alertService.evaluate(outcome.snapshot);
+        if (triggers.length > 0) {
+          await notifications.sendAlerts(triggers);
+        }
+      }
+
       return outcome;
     }
 

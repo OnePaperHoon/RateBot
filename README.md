@@ -67,7 +67,26 @@ Discord 채널에 **메시지 하나**를 만들어 두고, 그 메시지를 1�
 - 메시지가 삭제되면 자동으로 다시 만들고 새 ID를 기억
 - 상승 `▲` / 하락 `▼` / 보합 `―`, 변화량과 변화율, 당일 고가·저가
 - 데이터가 5분 이상 낡으면 경고 표시
-- 슬래시 커맨드 4개: `/yen`, `/yen-history`, `/yen-status`, `/yen-refresh`
+- 슬래시 커맨드 5개: `/yen`, `/yen-history`, `/yen-status`, `/yen-refresh`, `/yen-alert`
+
+### 목표 환율 알림
+
+목표 환율에 도달하면 지정한 사람을 **멘션**해서 알려줍니다.
+
+```text
+@내계정 💸 환전 타이밍입니다!!!!!
+
+100 JPY = 938.40 KRW
+목표가 이하로 내려갔습니다
+
+목표 조건          현재 환율        오늘 범위
+940.00 KRW 이하    938.40 KRW      938.40 ~ 949.10 KRW
+```
+
+- 방향 선택: `아래로`(엔화 싸질 때 = 살 때) / `위로`(비싸질 때 = 팔 때)
+- **스팸 방지**: 목표 도달 시 한 번만 발송. 환율이 경계선에서 흔들려도 반복되지 않습니다
+- 1회성 / 반복 선택 가능, 사용자당 최대 20개
+- SQLite 에 저장되어 재시작해도 유지됩니다
 
 ### Notion
 
@@ -159,8 +178,8 @@ yenwatch/
 │   ├── discord/              클라이언트, Embed, 상태 메시지, 슬래시 커맨드
 │   ├── notion/               클라이언트, 스키마 검증, 상태/이력 저장소
 │   ├── scraper/              네이버 파서 (parsers.ts / naverJpyScraper.ts)
-│   ├── database/             연결, 마이그레이션, 3개 저장소
-│   ├── services/             환율/헬스/알림/스케줄러/보존
+│   ├── database/             연결, 마이그레이션, 4개 저장소(환율/설정/헬스/알림)
+│   ├── services/             환율/헬스/알림/목표알림/스케줄러/보존
 │   ├── utils/                retry, mutex, sparkline, time, money
 │   └── types/
 ├── tests/                    180개 단위 테스트 + 통합 테스트
@@ -543,6 +562,7 @@ npm run cli -- service             # systemd 명령 안내
 | `FAILURE_ALERT_THRESHOLD` | `5`              | 연속 실패 이 횟수에 경고 1회 발송               |
 | `MIN_VALID_JPY100_KRW`    | `100`            | 유효 최소값 (100 JPY 당 KRW)                    |
 | `MAX_VALID_JPY100_KRW`    | `2000`           | 유효 최대값                                     |
+| `ALERT_REARM_MARGIN_KRW`  | `1`              | 알림이 울린 뒤 재무장에 필요한 여유폭(KRW)      |
 
 ### 저장소
 
@@ -639,6 +659,46 @@ npm run format:check  # 정렬 확인만
 | `/yen-history period:24h` | 기간 통계 + 텍스트 스파크라인 (`1h`/`6h`/`12h`/`24h`/`7d`)       | 채널 공개  |
 | `/yen-status`             | 실행 시간, Discord·Notion·SQLite 상태, 실패 횟수, 다음 수집 예정 | **본인만** |
 | `/yen-refresh`            | 즉시 재수집 (허용 사용자만, 30초 쿨다운)                         | **본인만** |
+| `/yen-alert add`          | 목표 환율 알림 등록                                              | **본인만** |
+| `/yen-alert list`         | 등록된 알림 목록                                                 | **본인만** |
+| `/yen-alert remove`       | 알림 삭제                                                        | **본인만** |
+
+#### 목표 환율 알림 사용법
+
+```text
+/yen-alert add rate:940 direction:아래로
+        → 100 JPY 가 940 KRW 이하로 내려가면 나를 멘션
+
+/yen-alert add rate:960 direction:위로 once:true
+        → 960 KRW 이상 올라가면 한 번만 알리고 종료
+
+/yen-alert add rate:935 direction:아래로 user:@친구 label:여행 경비
+        → 친구를 멘션 (DISCORD_ALLOWED_USER_IDS 권한 필요)
+
+/yen-alert list         → 등록된 알림과 상태 확인
+/yen-alert remove id:3  → 3번 알림 삭제
+```
+
+**한 번 울린 알림이 다시 울리는 조건**
+
+목표선에서 `ALERT_REARM_MARGIN_KRW`(기본 1 KRW) 이상 벗어나야 다시 감시 상태가 됩니다.
+1분마다 수집하므로 이 장치가 없으면 환율이 목표선 근처에 머무는 동안
+하루 1,440번까지 멘션이 갈 수 있습니다.
+
+```text
+목표 "940 이하", margin 1.0 인 경우
+
+939.5  →  🔔 발송, 감시 해제
+939.8  →  조건은 맞지만 조용함
+940.5  →  아직 재무장 안 됨 (941 미만)
+941.2  →  재무장 — 다음에 940 이하로 내려가면 다시 발송
+```
+
+권한 규칙:
+
+- **본인 멘션**: 누구나 등록 가능
+- **다른 사람 멘션**: `DISCORD_ALLOWED_USER_IDS` 에 포함된 사용자만 (핑 남용 방지)
+- **삭제**: 본인이 만든 알림 또는 허용된 사용자
 
 ---
 

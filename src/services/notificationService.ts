@@ -1,7 +1,13 @@
 import { childLogger } from '../logger.js';
 import { toError } from '../errors.js';
 import type { StatusMessageManager } from '../discord/statusMessage.js';
-import { buildFailureAlertEmbed, buildRecoveryEmbed, buildStatusEmbed } from '../discord/embeds.js';
+import {
+  buildAlertEmbed,
+  buildFailureAlertEmbed,
+  buildRecoveryEmbed,
+  buildStatusEmbed,
+} from '../discord/embeds.js';
+import type { AlertTrigger } from './alertService.js';
 import type { NotionHistoryRepository } from '../notion/historyRepository.js';
 import type { NotionStatusRepository } from '../notion/statusRepository.js';
 import { describeNotionError } from '../notion/client.js';
@@ -160,6 +166,39 @@ export class NotificationService {
       const error = toError(caught);
       log.error({ event: 'failure_alert_failed', reason: error.message }, '경고 발송 실패');
       this.#healthRepo.record('discord', 'error', `경고 발송 실패: ${error.message}`);
+    }
+  }
+
+  /**
+   * 목표 환율 알림을 발송한다 — 지정된 사용자를 실제로 멘션한다.
+   *
+   * 알림 하나가 실패해도 나머지는 계속 보낸다.
+   */
+  async sendAlerts(triggers: readonly AlertTrigger[]): Promise<void> {
+    if (this.#statusMessage === null || triggers.length === 0) return;
+
+    for (const trigger of triggers) {
+      const { alert, snapshot } = trigger;
+      try {
+        await this.#statusMessage.sendMention(
+          `<@${alert.mentionUserId}> 💸 **환전 타이밍입니다!!!!!**`,
+          buildAlertEmbed(alert, snapshot),
+          [alert.mentionUserId],
+          alert.channelId,
+        );
+        log.info({ event: 'alert_sent', alertId: alert.id, rate: snapshot.rate }, '환율 알림 발송');
+      } catch (caught) {
+        const error = toError(caught);
+        log.error(
+          { event: 'alert_send_failed', alertId: alert.id, reason: error.message },
+          '환율 알림 발송 실패 (수집은 계속됩니다)',
+        );
+        this.#healthRepo.record(
+          'discord',
+          'error',
+          `알림 #${alert.id} 발송 실패: ${error.message}`,
+        );
+      }
     }
   }
 

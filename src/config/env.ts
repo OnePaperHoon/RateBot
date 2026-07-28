@@ -113,6 +113,9 @@ export const envSchema = z
     MIN_VALID_JPY100_KRW: numberish(100, { min: 0 }),
     MAX_VALID_JPY100_KRW: numberish(2_000, { min: 0 }),
 
+    // ---------- 목표 환율 알림 ----------
+    ALERT_REARM_MARGIN_KRW: numberish(1, { min: 0, max: 100 }),
+
     // ---------- 저장소 ----------
     SQLITE_PATH: z
       .string()
@@ -265,6 +268,7 @@ export function summarizeEnv(env: Env): Record<string, string | number | boolean
     FAILURE_ALERT_THRESHOLD: env.FAILURE_ALERT_THRESHOLD,
     MIN_VALID_JPY100_KRW: env.MIN_VALID_JPY100_KRW,
     MAX_VALID_JPY100_KRW: env.MAX_VALID_JPY100_KRW,
+    ALERT_REARM_MARGIN_KRW: env.ALERT_REARM_MARGIN_KRW,
     SQLITE_PATH: env.SQLITE_PATH,
     DATA_RETENTION_DAYS: env.DATA_RETENTION_DAYS,
   };

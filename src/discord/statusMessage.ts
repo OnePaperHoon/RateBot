@@ -102,6 +102,34 @@ export class StatusMessageManager {
     }
   }
 
+  /**
+   * 사용자를 실제로 멘션(핑)하는 메시지를 보낸다.
+   *
+   * `allowedMentions` 를 명시하지 않으면 Discord 가 내용 속 `<@id>` 를 파싱해
+   * 의도치 않은 대상까지 핑할 수 있다. 여기서 허용 대상을 지정한 ID 로만 제한한다.
+   *
+   * @param channelId 알림을 등록한 채널. 없으면 기본 상태 채널로 보낸다.
+   */
+  async sendMention(
+    content: string,
+    embed: EmbedBuilder,
+    mentionUserIds: readonly string[],
+    channelId?: string,
+  ): Promise<Message> {
+    const target = channelId ?? this.#channelId;
+    const channel = await fetchTargetChannel(this.#client, target);
+    try {
+      return await channel.send({
+        content,
+        embeds: [embed],
+        allowedMentions: { users: [...new Set(mentionUserIds)], roles: [], parse: [] },
+      });
+    } catch (error) {
+      if (isPermissionError(error)) throw toPermissionError(error, target);
+      throw error;
+    }
+  }
+
   async #createMessage(embed: EmbedBuilder): Promise<Message> {
     const channel = await fetchTargetChannel(this.#client, this.#channelId);
 
