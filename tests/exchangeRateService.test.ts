@@ -50,8 +50,10 @@ function stubHttpClient(responses: {
 }
 
 function createScraper(httpClient: AxiosInstance): NaverJpyScraper {
+  // 이 파일은 서비스의 재시도/저장 로직을 검증한다. 스크레이퍼 경로 선택(JSON API 우선,
+  // HTML 폴백)은 naverJpyScraper.test.ts 가 다루므로 여기서는 HTML 경로만 쓴다.
   return new NaverJpyScraper(
-    { url: URL, timeoutMs: 10_000, minValid: 100, maxValid: 2_000 },
+    { url: URL, apiUrl: null, timeoutMs: 10_000, minValid: 100, maxValid: 2_000 },
     { httpClient },
   );
 }

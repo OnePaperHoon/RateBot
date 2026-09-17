@@ -32,11 +32,11 @@ describe.skipIf(!ENABLED)('통합: 네이버 금융 실제 호출', () => {
     expect(result.source).toBe(URL);
     expect(result.parser).toBeTruthy();
 
-    // 진단 정보 확인
+    // 진단 정보 확인 (2026-09 부터는 JSON API 경로가 정상이다)
     expect(result.diagnostics.httpStatus).toBe(200);
-    expect(result.diagnostics.contentType).toMatch(/text\/html/i);
-    expect(result.diagnostics.contentLength).toBeGreaterThan(1_000);
-    expect(result.diagnostics.charset).toMatch(/euc-kr/i);
+    expect(result.diagnostics.contentType).toMatch(/application\/json/i);
+    expect(result.diagnostics.contentLength).toBeGreaterThan(100);
+    expect(result.parser).toBe('stock_api_close_price');
 
     console.log(
       `[통합] 100 JPY = ${result.rate} KRW  (파서: ${result.parser}, ` +

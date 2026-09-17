@@ -5,6 +5,7 @@ import { childLogger } from '../logger.js';
 import type { ResponseDiagnostics, ScrapeResult } from '../types/exchangeRate.js';
 import { nowIso } from '../utils/time.js';
 import { parseJpyRate, summarizeAttempts } from './parsers.js';
+import { DEFAULT_STOCK_API_URL, STOCK_API_PARSER_NAME, parseStockApiBody } from './stockApi.js';
 
 const log = childLogger('scraper');
 
@@ -20,7 +21,13 @@ const USER_AGENT =
 const FALLBACK_CHARSET = 'euc-kr';
 
 export interface NaverScraperConfig {
+  /** HTML 파서용 페이지 URL (폴백 경로). */
   readonly url: string;
+  /**
+   * 1순위로 시도하는 JSON API URL.
+   * 생략하면 기본값(api.stock.naver.com)을 쓰고, `null` 이면 JSON 경로를 끈다.
+   */
+  readonly apiUrl?: string | null;
   readonly timeoutMs: number;
   readonly minValid: number;
   readonly maxValid: number;
@@ -66,22 +73,28 @@ export function decodeBody(body: Buffer, charset: string): string {
 }
 
 /**
- * 네이버 금융 엔화 상세 페이지 스크레이퍼.
+ * 네이버 엔화 환율 스크레이퍼.
+ *
+ * 수집 경로 (순서대로 시도):
+ *  1. 네이버 증권 JSON API (`apiUrl`) — 2026-09 이후 정식 경로
+ *  2. finance.naver.com HTML 페이지 + 복수 파서 (`url`) — 예전 경로, API 가 막히면 폴백
  *
  * 책임:
  *  1. HTTP 요청 (타임아웃 강제, 브라우저 UA)
  *  2. 인코딩 판별 및 디코딩
- *  3. 복수 파서로 환율 추출
+ *  3. JSON 필드 / 복수 파서로 환율 추출
  *  4. 유효성 범위 검사
  *
  * 재시도는 이 클래스가 아니라 상위 서비스(exchangeRateService)가 담당한다.
  */
 export class NaverJpyScraper {
   readonly #config: NaverScraperConfig;
+  readonly #apiUrl: string | null;
   readonly #http: AxiosInstance;
 
   constructor(config: NaverScraperConfig, deps: NaverScraperDeps = {}) {
     this.#config = config;
+    this.#apiUrl = config.apiUrl === undefined ? DEFAULT_STOCK_API_URL : config.apiUrl;
     this.#http =
       deps.httpClient ??
       axios.create({
@@ -105,6 +118,10 @@ export class NaverJpyScraper {
     return this.#config.url;
   }
 
+  get apiUrl(): string | null {
+    return this.#apiUrl;
+  }
+
   /**
    * 환율 1회 수집.
    *
@@ -114,6 +131,15 @@ export class NaverJpyScraper {
    */
   async fetchRate(signal?: AbortSignal): Promise<ScrapeResult> {
     const startedAt = Date.now();
+
+    // ---------- 1. JSON API ----------
+    // 실패 원인이 무엇이든 HTML 경로로 넘어간다. 여기서 던지는 예외는 범위 초과뿐이다.
+    if (this.#apiUrl !== null) {
+      const fromApi = await this.#tryStockApi(this.#apiUrl, startedAt, signal);
+      if (fromApi !== null) return fromApi;
+    }
+
+    // ---------- 2. HTML 페이지 + 파서 ----------
     const { body, diagnostics } = await this.#fetchBody(signal);
     const html = decodeBody(body, diagnostics.charset);
 
@@ -175,6 +201,100 @@ export class NaverJpyScraper {
       rate: value,
       parser,
       collectedAt: nowIso(),
+      source: this.#config.url,
+      diagnostics,
+    };
+  }
+
+  /**
+   * JSON API 로 1회 수집을 시도한다.
+   *
+   * @returns 성공하면 ScrapeResult, API 가 죽었거나 응답이 이상하면 `null` (HTML 폴백).
+   * @throws {RateValidationError} 값은 읽었지만 허용 범위를 벗어남 — 폴백하지 않는다.
+   */
+  async #tryStockApi(
+    apiUrl: string,
+    startedAt: number,
+    signal?: AbortSignal,
+  ): Promise<ScrapeResult | null> {
+    let response;
+    try {
+      response = await this.#http.get<ArrayBuffer>(apiUrl, {
+        timeout: this.#config.timeoutMs,
+        responseType: 'arraybuffer',
+        signal,
+        headers: { Accept: 'application/json,text/plain;q=0.9,*/*;q=0.8' },
+      });
+    } catch (error) {
+      const axiosError = error as AxiosError;
+      log.warn(
+        { event: 'stock_api_request_failed', code: axiosError.code ?? axiosError.message },
+        '네이버 증권 API 요청 실패 — HTML 페이지로 폴백합니다',
+      );
+      return null;
+    }
+
+    const body = Buffer.from(response.data);
+    const contentType = String(response.headers['content-type'] ?? '');
+    const diagnostics: ResponseDiagnostics = {
+      httpStatus: response.status,
+      contentType,
+      contentLength: body.byteLength,
+      charset: 'utf-8',
+    };
+
+    if (response.status < 200 || response.status >= 300 || body.byteLength === 0) {
+      log.warn(
+        { event: 'stock_api_http_error', ...diagnostics },
+        '네이버 증권 API 가 비정상 응답을 반환했습니다 — HTML 페이지로 폴백합니다',
+      );
+      return null;
+    }
+
+    const outcome = parseStockApiBody(body.toString('utf8'));
+    if (!outcome.ok) {
+      log.warn(
+        { event: 'stock_api_parse_failed', reason: outcome.reason, ...diagnostics },
+        '네이버 증권 API 응답에서 환율을 찾지 못했습니다 — HTML 페이지로 폴백합니다',
+      );
+      return null;
+    }
+
+    const { value } = outcome;
+    if (value < this.#config.minValid || value > this.#config.maxValid) {
+      log.error(
+        {
+          event: 'rate_out_of_range',
+          rate: value,
+          parser: STOCK_API_PARSER_NAME,
+          min: this.#config.minValid,
+          max: this.#config.maxValid,
+          httpStatus: diagnostics.httpStatus,
+          contentLength: diagnostics.contentLength,
+        },
+        'API 환율이 허용 범위를 벗어났습니다 — 저장하지 않습니다',
+      );
+      throw new RateValidationError(value, this.#config.minValid, this.#config.maxValid);
+    }
+
+    log.debug(
+      {
+        event: 'rate_scraped',
+        rate: value,
+        parser: STOCK_API_PARSER_NAME,
+        field: outcome.field,
+        durationMs: Date.now() - startedAt,
+        httpStatus: diagnostics.httpStatus,
+        contentLength: diagnostics.contentLength,
+      },
+      '환율 수집 성공 (JSON API)',
+    );
+
+    return {
+      rate: value,
+      parser: STOCK_API_PARSER_NAME,
+      collectedAt: nowIso(),
+      // Discord/Notion 에 링크로 노출되므로 JSON 주소가 아닌 사람이 볼 수 있는 페이지를 남긴다.
       source: this.#config.url,
       diagnostics,
     };

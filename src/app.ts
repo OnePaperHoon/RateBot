@@ -102,6 +102,7 @@ export class YenWatchApp {
     // ---------- 2. 도메인 서비스 ----------
     const scraper = new NaverJpyScraper({
       url: env.NAVER_JPY_URL,
+      apiUrl: env.NAVER_JPY_API_URL,
       timeoutMs: env.REQUEST_TIMEOUT_MS,
       minValid: env.MIN_VALID_JPY100_KRW,
       maxValid: env.MAX_VALID_JPY100_KRW,

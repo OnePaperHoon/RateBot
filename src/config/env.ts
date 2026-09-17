@@ -67,6 +67,7 @@ const snowflake = z
 
 const DEFAULT_NAVER_URL =
   'https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_JPYKRW';
+const DEFAULT_NAVER_API_URL = 'https://api.stock.naver.com/marketindex/exchange/FX_JPYKRW';
 
 export const envSchema = z
   .object({
@@ -104,6 +105,17 @@ export const envSchema = z
       .optional()
       .transform((value) => (value && value.trim() !== '' ? value.trim() : DEFAULT_NAVER_URL))
       .pipe(z.string().url('올바른 URL 이어야 합니다')),
+    // 1순위 수집 경로. 비우면 기본값, `off` 면 JSON API 를 끄고 HTML 파서만 쓴다.
+    NAVER_JPY_API_URL: z
+      .string()
+      .optional()
+      .transform((value) => {
+        const trimmed = value?.trim() ?? '';
+        if (trimmed === '') return DEFAULT_NAVER_API_URL;
+        if (trimmed.toLowerCase() === 'off') return null;
+        return trimmed;
+      })
+      .pipe(z.string().url('올바른 URL 이어야 합니다 (끄려면 off)').nullable()),
     SCRAPE_INTERVAL_SECONDS: numberish(60, { min: 10, max: 86_400, int: true }),
     REQUEST_TIMEOUT_MS: numberish(10_000, { min: 1_000, max: 120_000, int: true }),
     STALE_AFTER_MINUTES: numberish(5, { min: 1, max: 1_440, int: true }),
@@ -262,6 +274,7 @@ export function summarizeEnv(env: Env): Record<string, string | number | boolean
     NOTION_HISTORY_DATA_SOURCE_ID: maskId(env.NOTION_HISTORY_DATA_SOURCE_ID),
     NOTION_HISTORY_INTERVAL_MINUTES: env.NOTION_HISTORY_INTERVAL_MINUTES,
     NAVER_JPY_URL: env.NAVER_JPY_URL,
+    NAVER_JPY_API_URL: env.NAVER_JPY_API_URL ?? 'off',
     SCRAPE_INTERVAL_SECONDS: env.SCRAPE_INTERVAL_SECONDS,
     REQUEST_TIMEOUT_MS: env.REQUEST_TIMEOUT_MS,
     STALE_AFTER_MINUTES: env.STALE_AFTER_MINUTES,

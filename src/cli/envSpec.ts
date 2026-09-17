@@ -130,9 +130,17 @@ export const ENV_GROUPS: readonly EnvGroup[] = [
     title: '수집 설정',
     vars: [
       {
+        key: 'NAVER_JPY_API_URL',
+        label: '네이버 증권 환율 API URL',
+        hint: '1순위 수집 경로. 보통 기본값 그대로 사용합니다 (끄려면 off)',
+        required: false,
+        secret: false,
+        defaultValue: 'https://api.stock.naver.com/marketindex/exchange/FX_JPYKRW',
+      },
+      {
         key: 'NAVER_JPY_URL',
-        label: '네이버 엔화 페이지 URL',
-        hint: '보통 기본값 그대로 사용합니다',
+        label: '네이버 엔화 페이지 URL (HTML 폴백)',
+        hint: 'API 가 실패할 때만 사용합니다. 보통 기본값 그대로 사용합니다',
         required: false,
         secret: false,
         defaultValue:

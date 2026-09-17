@@ -75,6 +75,7 @@ function reloadEnv(): void {
 
 const DEFAULT_NAVER_URL =
   'https://finance.naver.com/marketindex/exchangeDetail.naver?marketindexCd=FX_JPYKRW';
+const DEFAULT_NAVER_API_URL = 'https://api.stock.naver.com/marketindex/exchange/FX_JPYKRW';
 
 /**
  * 수집/저장에 필요한 설정만 뽑아낸다.
@@ -85,6 +86,7 @@ const DEFAULT_NAVER_URL =
  */
 function localConfigFromEnv(): {
   url: string;
+  apiUrl: string | null;
   timeoutMs: number;
   minValid: number;
   maxValid: number;
@@ -104,6 +106,10 @@ function localConfigFromEnv(): {
 
   return {
     url: str('NAVER_JPY_URL', DEFAULT_NAVER_URL),
+    apiUrl: ((): string | null => {
+      const raw = str('NAVER_JPY_API_URL', DEFAULT_NAVER_API_URL);
+      return raw.toLowerCase() === 'off' ? null : raw;
+    })(),
     timeoutMs: num('REQUEST_TIMEOUT_MS', 10_000),
     minValid: num('MIN_VALID_JPY100_KRW', 100),
     maxValid: num('MAX_VALID_JPY100_KRW', 2_000),
@@ -308,12 +314,14 @@ export async function testScrape(persist: boolean): Promise<void> {
   const config = localConfigFromEnv();
   const scraper = new NaverJpyScraper({
     url: config.url,
+    apiUrl: config.apiUrl,
     timeoutMs: config.timeoutMs,
     minValid: config.minValid,
     maxValid: config.maxValid,
   });
 
-  info(`요청: ${config.url}`);
+  info(`요청(API): ${config.apiUrl ?? '사용 안 함'}`);
+  info(`요청(HTML 폴백): ${config.url}`);
   info(`유효 범위: ${config.minValid} ~ ${config.maxValid} KRW / 100 JPY`);
   const startedAt = Date.now();
 
@@ -354,7 +362,7 @@ export async function testScrape(persist: boolean): Promise<void> {
     }
   } catch (error) {
     fail(`수집 실패: ${describeError(error)}`);
-    info('네트워크 상태와 NAVER_JPY_URL 을 확인하세요.');
+    info('네트워크 상태와 NAVER_JPY_API_URL / NAVER_JPY_URL 을 확인하세요.');
   }
 }
 
